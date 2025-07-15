@@ -13,9 +13,9 @@ DX = 1.0 / N_GRID_SIDE   # 格子点の間隔
 GRID_POINT_RADIUS = 2 # ピクセルで半径
 GRID_POINT_RADIUS_NORM = GRID_POINT_RADIUS / WIN_X  # 半径を正規化座標に変換
 # 粒子のパラメータ
-PARTICLE_RADIUS = 15 # ピクセルで半径
+PARTICLE_RADIUS = 10 # ピクセルで半径
 PARTICLE_RADIUS_NORM = PARTICLE_RADIUS / WIN_X  # 半径を正規化座標に変換
-N_PARTICLES = 10    # 粒子の数
+N_PARTICLES = 100    # 粒子の数
 PARTICLE_MASS = 1.0
 
 # グローバル変数
@@ -27,8 +27,8 @@ grid_vel = np.zeros((N_GRID_SIDE, N_GRID_SIDE, 2))
 
 class Particle:
     def __init__(self, x, y, vx, vy, mass, radius, color, canvas):
-        self.pos = [x, y]
-        self.vel = [vx, vy]
+        self.pos = np.array([x, y], dtype=float)
+        self.vel = np.array([vx, vy], dtype=float)
         self.mass = mass
         self.radius = radius
         self.color = color
@@ -51,11 +51,10 @@ class Particle:
         else:
             self.canvas.coords(self.id, x0, y0, x1, y1)
 
+# 描画用のグリッドクラス
 class GridPoints:
-    def __init__(self, x, y, vx, vy, mass, radius, color, canvas):
+    def __init__(self, x, y, radius, color, canvas):
         self.pos = [x, y]
-        self.vel = [vx, vy]
-        self.mass = mass
         self.radius = radius
         self.color = color
         self.canvas = canvas
@@ -92,16 +91,13 @@ def particles_init():
 def grid_points_init():
     global grid_points
 
-    x, y = 0.0, 0.0
     for i in range(N_GRID_SIDE):
         for j in range(N_GRID_SIDE):
+            # グリッド点はセルの中心にある
             x = (j + 0.5) * DX
             y = (i + 0.5) * DX
-            vx = 0
-            vy = 0
             color = "#FFFFFF"
-
-            g = GridPoints(x, y, vx, vy, 0.0, GRID_POINT_RADIUS_NORM, color, canvas)
+            g = GridPoints(x, y, GRID_POINT_RADIUS_NORM, color, canvas)
             grid_points.append(g)
 
 def main_loop():
@@ -109,40 +105,72 @@ def main_loop():
     grid_mass.fill(0)
     grid_vel.fill(0)
 
-    # P2G
+    # ステップ1: P2G
     for p in particles:
-        # 粒子のy座標から、どのグリッドセルの間にいるか計算
-        grid_pos_y = p.pos[1] / DX
-        base_node_y = int(grid_pos_y)
+        # 粒子の座標から、どのグリッドセルの間にいるか計算
+        grid_pos = p.pos / DX
+        # 左下のノードのインデックス（intにキャスト）
+        base_node = grid_pos.astype(int)
 
-        # 粒子から base_node と base_node+1 までの距離（重み）を計算
-        fx = grid_pos_y = base_node_y
-        w = np.array([1.0 - fx, fx])
+        # 1Dシミュレーションなので、X方向は一番近い列を使う
+        base_node_x = base_node[0]
+        base_node_y = base_node[1]
 
-        # 質量と運動量を近傍の2つのグリッド点に分配
-        grid_mass[base_node_y : base_node_y + 2] += w * p.mass
-        grid_vel[base_node_y : base_node_y + 2] += w * p.mass * p.vel[1] # Y方向の運動量
+        # 粒子から base_node_y と base_node_y+1 までの距離（重み）を計算
+        fx_y = grid_pos[1] - base_node_y
+        w_y = np.array([1.0 - fx_y, fx_y])
 
-    # グリッド上での計算
+        # Xインデックス(base_node_x)を指定して、Y方向の2点に分配
+        for i in range(2):  # y と y+1 の2点についてループ
+            weight = w_y[i]
+            # 質量を分配
+            grid_mass[base_node_y + i, base_node_x] += weight * p.mass
+            # Y方向の運動量を分配（p.velはベクトルなのでp.vel[1]でY成分を取得
+            grid_vel[base_node_y + i, base_node_x, 1] += weight * p.mass * p.vel[1]
+
+    # ステップ2: グリッド上での計算
     # 運動量を質量で割り、速度に変換
-    # np.divide の where を使うとゼロ徐算を安全に避けられる
-    np.divide(grid_vel, grid_mass, out=grid_vel, where=grid_mass != 0.0)
+    # 質量が0のままの速度は0のまま
+    mass_filter = grid_mass > 1e-10 # ごくわずかな質量も考慮
+    grid_vel[mass_filter, 1] /= grid_mass[mass_filter]
 
-    # 重力を加える
-    grid_vel[1] += DT * GRAVITY
+    # 重力を加える（質量があるすべての点に）
+    grid_vel[mass_filter, 1] += DT * GRAVITY
 
     # 境界条件（床と天井で跳ね返る、または止まる）
-    if grid_vel[1] < 0: # 床より下に行こうとしたら
-        grid_vel[1] = 0 # 止める
-    if grid_vel[N_GRID_SIDE - 1] > 0:   # 天井より上に行こうとしたら
-        grid_vel[N_GRID_SIDE - 1] = 0   # 止める
+    # Y=0（床）と Y=N_GRID_SIDE-1（天井）での処理
+    grid_vel[0, :, 1][grid_vel[0, :, 1] < 0] = 0    # 床より下に行こうとしたら止める
+    grid_vel[N_GRID_SIDE - 1, :, 1][grid_vel[N_GRID_SIDE - 1, :, 1] > 0] = 0    # 天井より上に行こうとしたらとめる
 
-    # G2P
+    # ステップ3: G2P
+    for p in particles:
+        # 同様に、近傍グリッドとその重みを計算
+        grid_pos = p.pos / DX
+        base_node = grid_pos.astype(int)
+        base_node_x = base_node[0]
+        base_node_y = base_node[1]
 
+        fx_y = grid_pos[1] - base_node_y
+        w_y = np.array([1.0 - fx_y, fx_y])
 
+        # グリッドから補間して新しい速度を計算
+        new_vel_y = 0.0
+        for i in range(2):
+            weight = w_y[i]
+            new_vel_y += weight * grid_vel[base_node_y + i, base_node_x, 1]
+
+        # 速度を代入する
+        p.vel[1] = new_vel_y
+
+        # 新しい速度で位置を更新
+        p.pos += DT * p.vel
+
+        # X方向は今は動かさない
+        # p.pos[0] += DT * p.vel[0]
+
+    # ステップ4: 描画
     for p in particles:
         p.draw()
-
     for g in grid_points:
         g.draw()
 
