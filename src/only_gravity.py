@@ -1,19 +1,20 @@
 import tkinter as tk
 import numpy as np
 import random
+import time
 
 # パラメータ
 WIN_X, WIN_Y = 800, 800
 # 物理パラメータ
-DT = 1e-4
+DT = 1e-4 * 5
 GRAVITY = -9.81
 # グリッドのパラメータ
-N_GRID_SIDE = 8 # 各軸の格子点
+N_GRID_SIDE = 32 # 各軸の格子点
 DX = 1.0 / N_GRID_SIDE   # 格子点の間隔
-GRID_POINT_RADIUS = 2 # ピクセルで半径
+GRID_POINT_RADIUS = 1 # ピクセルで半径
 GRID_POINT_RADIUS_NORM = GRID_POINT_RADIUS / WIN_X  # 半径を正規化座標に変換
 # 粒子のパラメータ
-PARTICLE_RADIUS = 10 # ピクセルで半径
+PARTICLE_RADIUS = 5 # ピクセルで半径
 PARTICLE_RADIUS_NORM = PARTICLE_RADIUS / WIN_X  # 半径を正規化座標に変換
 N_PARTICLES = 100    # 粒子の数
 PARTICLE_MASS = 1.0
@@ -24,6 +25,8 @@ grid_points = []
 # 計算用のグリッドデータ (NumPy配列)
 grid_mass = np.zeros((N_GRID_SIDE, N_GRID_SIDE))
 grid_vel = np.zeros((N_GRID_SIDE, N_GRID_SIDE, 2))
+# FPS計算用の変数
+last_time, frame_count, fps = 0, 0, 0
 
 class Particle:
     def __init__(self, x, y, vx, vy, mass, radius, color, canvas):
@@ -79,14 +82,13 @@ def particles_init():
     global particles
 
     for p in range(N_PARTICLES):
-        x = random.uniform(0.4, 0.6)
-        y = random.uniform(0.4, 0.6)
-        vx = 0
-        vy = 0
-        color = "#06D6A0"
-
-        p = Particle(x, y, vx, vy, PARTICLE_MASS, PARTICLE_RADIUS_NORM, color, canvas)
-        particles.append(p)
+        px = random.uniform(-0.2, 0.2)
+        py = random.uniform(-0.2, 0.2)
+        if px**2 + py**2 < 0.2**2:
+            x = 0.5 + px
+            y = 0.7 + py
+            p = Particle(x, y, 0.0, 0.0, PARTICLE_MASS, PARTICLE_RADIUS_NORM, "#06D6A0", canvas)
+            particles.append(p)
 
 def grid_points_init():
     global grid_points
@@ -101,6 +103,16 @@ def grid_points_init():
             grid_points.append(g)
 
 def main_loop():
+    global last_time, frame_count, fps
+    # FPS計算用のロジック
+    current_time = time.time()
+    frame_count += 1
+    if current_time - last_time > 1.0:
+        fps = frame_count / (current_time - last_time)
+        window.title(f"Basic MPM Simulation - fps: {fps:.1f}")
+        frame_count = 0
+        last_time = current_time
+
     # グリッドのリセット
     grid_mass.fill(0)
     grid_vel.fill(0)
@@ -109,36 +121,49 @@ def main_loop():
     for p in particles:
         # 粒子の座標から、どのグリッドセルの間にいるか計算
         grid_pos = p.pos / DX
-        # 左下のノードのインデックス（intにキャスト）
+        # 左下のノード（格子点）のインデックス（intにキャスト）
         base_node = grid_pos.astype(int)
+        # 左下のノード（格子点）からの相対距離
+        fx = grid_pos - base_node
 
-        # 1Dシミュレーションなので、X方向は一番近い列を使う
-        base_node_x = base_node[0]
-        base_node_y = base_node[1]
+        # バイリニア補間の重みを計算
+        w = [
+            (1 - fx[0]) * (1 - fx[1]),  # 左下(w00)
+            fx[0] * (1 - fx[1]),        # 右下(w10)
+            (1 - fx[0]) * fx[1],        # 左上(w01)
+            fx[0] * fx[1]               # 右上(w11)
+        ]
 
-        # 粒子から base_node_y と base_node_y+1 までの距離（重み）を計算
-        fx_y = grid_pos[1] - base_node_y
-        w_y = np.array([1.0 - fx_y, fx_y])
-
-        # Xインデックス(base_node_x)を指定して、Y方向の2点に分配
-        for i in range(2):  # y と y+1 の2点についてループ
-            weight = w_y[i]
-            # 質量を分配
-            grid_mass[base_node_y + i, base_node_x] += weight * p.mass
-            # Y方向の運動量を分配（p.velはベクトルなのでp.vel[1]でY成分を取得
-            grid_vel[base_node_y + i, base_node_x, 1] += weight * p.mass * p.vel[1]
+        # 周囲4点のグリッドに質量と運動量を分配
+        for i in range(2):  # Y方向 (0 or 1)
+            for j in range(2):  # X方向 (0 or 1)
+                # グリッドインデックスが範囲内かチェック
+                node_idx_y = base_node[1] + i
+                node_idx_x = base_node[0] + j
+                if 0 <= node_idx_x < N_GRID_SIDE and 0 <= node_idx_y < N_GRID_SIDE:
+                    weight_index = i * 2 + j
+                    weight = w[weight_index]
+                    node_idx = (base_node[1] + i, base_node[0] + j)
+                    # 質量を送信
+                    grid_mass[node_idx] += weight * p.mass
+                    # 運動量を送信
+                    grid_vel[node_idx] += weight * p.mass * p.vel
 
     # ステップ2: グリッド上での計算
     # 運動量を質量で割り、速度に変換
     # 質量が0のままの速度は0のまま
     mass_filter = grid_mass > 1e-10 # ごくわずかな質量も考慮
-    grid_vel[mass_filter, 1] /= grid_mass[mass_filter]
+    # 運動量を質量で割り、速度ベクトルに変換
+    grid_vel[mass_filter] /= grid_mass[mass_filter, np.newaxis]
 
     # 重力を加える（質量があるすべての点に）
     grid_vel[mass_filter, 1] += DT * GRAVITY
 
-    # 境界条件（床と天井で跳ね返る、または止まる）
-    # Y=0（床）と Y=N_GRID_SIDE-1（天井）での処理
+    # 境界条件（4方の壁）
+    # X方向の壁
+    grid_vel[:, 0, 0][grid_vel[:, 0, 0] < 0] = 0    # 左壁
+    grid_vel[:, N_GRID_SIDE - 1, 0][grid_vel[:, N_GRID_SIDE - 1, 0] > 0] = 0    # 右壁
+    # Y方向の壁
     grid_vel[0, :, 1][grid_vel[0, :, 1] < 0] = 0    # 床より下に行こうとしたら止める
     grid_vel[N_GRID_SIDE - 1, :, 1][grid_vel[N_GRID_SIDE - 1, :, 1] > 0] = 0    # 天井より上に行こうとしたらとめる
 
@@ -147,26 +172,30 @@ def main_loop():
         # 同様に、近傍グリッドとその重みを計算
         grid_pos = p.pos / DX
         base_node = grid_pos.astype(int)
-        base_node_x = base_node[0]
-        base_node_y = base_node[1]
+        fx = grid_pos - base_node
 
-        fx_y = grid_pos[1] - base_node_y
-        w_y = np.array([1.0 - fx_y, fx_y])
+        w = [
+            (1.0 - fx[0]) * (1.0 - fx[1]),
+            fx[0] * (1.0 - fx[1]),
+            (1.0 - fx[0]) * fx[1],
+            fx[0] * fx[1]
+        ]
 
         # グリッドから補間して新しい速度を計算
-        new_vel_y = 0.0
-        for i in range(2):
-            weight = w_y[i]
-            new_vel_y += weight * grid_vel[base_node_y + i, base_node_x, 1]
+        new_vel = np.zeros(2)
+        for i in range(2):  # Y軸
+            for j in range(2):  # X軸
+                # グリッドインデックスが範囲内かチェック
+                node_idx_y = base_node[1] + i
+                node_idx_x = base_node[0] + j
+                if 0 <= node_idx_x < N_GRID_SIDE and 0 <= node_idx_y < N_GRID_SIDE:
+                    weight_index = i * 2 + j
+                    weight = w[weight_index]
+                    node_idx = (base_node[1] + i, base_node[0] + j)
+                    new_vel += weight * grid_vel[node_idx]
 
-        # 速度を代入する
-        p.vel[1] = new_vel_y
-
-        # 新しい速度で位置を更新
+        p.vel = new_vel
         p.pos += DT * p.vel
-
-        # X方向は今は動かさない
-        # p.pos[0] += DT * p.vel[0]
 
     # ステップ4: 描画
     for p in particles:
